@@ -21,7 +21,7 @@ DB_CONNECTION_STRING = os.getenv("DATABASE_URL")
 if not DB_CONNECTION_STRING:
     raise ValueError("CRITICAL ERROR: DATABASE_URL is not set in the .env file.")
 
-COLLECTION_NAME = "lesson_plans"
+COLLECTION_NAME = "aptitude_questions"
 
 # Global variables for lazy loading
 _embeddings = None

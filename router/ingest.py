@@ -1,9 +1,9 @@
 import os
-import re
 import tempfile
 import logging
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Depends
 from pydantic import BaseModel
+import psycopg2 # Required if you use the reset-topic route
 
 # LangChain Imports
 from langchain_community.document_loaders import PyMuPDFLoader
@@ -24,61 +24,25 @@ class IngestionResponse(BaseModel):
     message: str
     chunks_processed: int
     metadata: dict
-    route_used: str
 
-# --- KRUTIDEV TO UNICODE CONVERTER (The Data Science Fix) ---
-def convert_krutidev_to_unicode(text: str) -> str:
-    """
-    Cleans legacy KrutiDev Hindi/Sanskrit font encodings and maps them to standard Unicode.
-    """
-    if not text:
-        return ""
-
-    # Step 1: Handle 'f' (chhoti ee matra 'ि')
-    text = re.sub(r'f(.)', r'\1f', text)
-
-    # Step 2: Handle 'Z' (reph 'र्')
-    text = re.sub(r'(.)Z', r'Z\1', text)
-
-    # Step 3: Core KrutiDev Character Mapping
-    replacements = {
-        "oqQ": "कु", "fozQ": "क्रि", "Fk": "थ", "vk": "आ", "bZ": "ई", "b": "इ",
-        "¾": "=", "ß": "त्र", "Z": "र्", "f": "ि", "k": "ा", "s": "े", "S": "ै",
-        "a": "ं", "~": "्", "%": "ः", "Q": "क", "o": "व", "i": "प", "j": "र",
-        "h": "ी", "r": "त", "e": "म", "y": "ल", "u": "न", "w": "ू", "x": "ग",
-        "I": "प्", "A": "ाँ", "c": "ब", "C": "ब्", "d": "क", "D": "क्", "g": "ह",
-        "G": "ह्", "l": "स", "L": "स्", "m": "उ", "M": "श्", "n": "द", "N": "छ",
-        "p": "च", "P": "च्", "q": "ु", "R": "त्", "t": "ू", "T": "ट्", "U": "न्",
-        "v": "अ", "V": "ट", "X": "ग्", "Y": "ल्", "z": "्र", "`": "़", "O": "व्",
-        "K": "ज्ञ", "J": "श्र", "E": "म्", "¡": "ँ", "¯": "ं", "[": "ख", ";": "य", 
-        ".k": "ण", "B": "ठ", "1": "१", "2": "२", "3": "३", "4": "४", "5": "५", 
-        "6": "६", "7": "७", "8": "८", "9": "९", "0": "०", "-": ".", "(": "(", ")": ")"
-    }
-
-    sorted_replacements = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
-
-    for kruti_char, unicode_char in sorted_replacements:
-        text = text.replace(kruti_char, unicode_char)
-
-    return text
-
-# --- CORE LOGIC (DRY Principle) ---
-async def process_document(
-    file: UploadFile, 
-    class_name: str, 
-    subject: str, 
-    chapter_name: str, 
-    vs: PGVector, 
-    is_devanagari: bool, 
-    route_name: str
+# --- CORE ROUTE ---
+@router.post("/ingest/aptitude", response_model=IngestionResponse)
+async def ingest_aptitude_pdf(
+    file: UploadFile = File(...),
+    category: str = Form(..., description="e.g., Quantitative Aptitude, Logical Reasoning"),
+    topic: str = Form(..., description="e.g., Time and Work, Profit and Loss"),
+    target_grade: str = Form(..., description="e.g., 6-8, 9-10, 11-12"),     # <-- NEW
+    difficulty: str = Form(..., description="e.g., Easy, Medium, Hard"),       # <-- NEW
+    vs: PGVector = Depends(get_vector_store)
 ):
-    """ Core function to handle extraction, optional NLP cleaning, chunking, and embedding. """
-    logger.info(f"[{route_name.upper()}] Starting ingestion for Class: {class_name}, Subject: {subject}, Chapter: {chapter_name}")
+    """ Uploads an Aptitude PDF, chunks it, and saves it with rich metadata to the PostgreSQL Vector Database. """
+    logger.info(f"Starting ingestion for Category: {category}, Topic: {topic}, Grade: {target_grade}, Difficulty: {difficulty}")
     
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDFs supported.")
 
     try:
+        # Save file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(await file.read())
             tmp_path = tmp.name
@@ -89,28 +53,22 @@ async def process_document(
         logger.info("Parsing PDF document...")
         loader = PyMuPDFLoader(tmp_path)
         documents = loader.load()
-        
-        # CONDITIONALLY APPLY THE DATA SCIENCE FIX
-        if is_devanagari:
-            logger.info("Running NLP Regex Translation: Converting legacy KrutiDev encoding to Unicode Devanagari...")
-            for doc in documents:
-                doc.page_content = convert_krutidev_to_unicode(doc.page_content)
-        else:
-            logger.info("Bypassing translation: English text detected.")
 
         logger.info("Chunking document text...")
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        # Chunk size of 1000 is good for keeping 2-3 aptitude questions together
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
         chunks = text_splitter.split_documents(documents)
 
+        # Injecting our rich custom metadata into every single chunk
         for chunk in chunks:
             chunk.metadata.update({
-                "class_name": class_name,
-                "subject": subject,
-                "chapter_name": chapter_name,
-                "language": "devanagari" if is_devanagari else "english"
+                "category": category,
+                "topic": topic,
+                "target_grade": target_grade, # <-- NEW
+                "difficulty": difficulty      # <-- NEW
             })
 
-        logger.info(f"Generating embeddings and inserting {len(chunks)} vectors into PostgreSQL...")
+        logger.info(f"Inserting {len(chunks)} vectors into PostgreSQL...")
         vs.add_documents(chunks)
         logger.info("Vector insertion complete!")
 
@@ -123,32 +81,57 @@ async def process_document(
             os.remove(tmp_path)
 
     return IngestionResponse(
-        message="Lesson successfully ingested and vectorized.",
+        message="PDF successfully ingested and vectorized.",
         chunks_processed=len(chunks),
-        metadata={"class": class_name, "subject": subject, "chapter": chapter_name},
-        route_used=route_name
+        metadata={
+            "category": category, 
+            "topic": topic, 
+            "target_grade": target_grade, 
+            "difficulty": difficulty
+        }
     )
 
-# --- ROUTE 1: ENGLISH ---
-@router.post("/ingest/en", response_model=IngestionResponse)
-async def ingest_english(
-    file: UploadFile = File(...),
-    class_name: str = Form(...),
-    subject: str = Form(...),
-    chapter_name: str = Form(...),
-    vs: PGVector = Depends(get_vector_store)
+# --- TARGETED DELETE ROUTE (Optional but highly recommended) ---
+@router.delete("/reset-topic")
+async def delete_topic_vectors(
+    category: str, 
+    topic: str,
+    target_grade: str,
+    difficulty: str
 ):
-    """ Uploads an English PDF. Does NOT apply the KrutiDev fix. """
-    return await process_document(file, class_name, subject, chapter_name, vs, is_devanagari=False, route_name="english")
+    """ Deletes specific vectors matching exact metadata from the database. """
+    logger.info(f"Attempting to delete vectors for {topic} ({difficulty}, Grade {target_grade})")
+    
+    db_url = os.getenv("DATABASE_URL")
+    
+    try:
+        clean_url = db_url.replace("postgresql+psycopg2://", "postgresql://")
+        conn = psycopg2.connect(clean_url)
+        cursor = conn.cursor()
 
-# --- ROUTE 2: DEVANAGARI (HINDI/SANSKRIT) ---
-@router.post("/ingest/devanagari", response_model=IngestionResponse)
-async def ingest_devanagari(
-    file: UploadFile = File(...),
-    class_name: str = Form(...),
-    subject: str = Form(...),
-    chapter_name: str = Form(...),
-    vs: PGVector = Depends(get_vector_store)
-):
-    """ Uploads a Hindi/Sanskrit PDF. APPLIES the KrutiDev to Unicode NLP translation. """
-    return await process_document(file, class_name, subject, chapter_name, vs, is_devanagari=True, route_name="devanagari")
+        # SQL query to delete based on the JSON metadata keys
+        delete_query = """
+            DELETE FROM langchain_pg_embedding 
+            WHERE cmetadata->>'category' = %s 
+            AND cmetadata->>'topic' = %s
+            AND cmetadata->>'target_grade' = %s
+            AND cmetadata->>'difficulty' = %s;
+        """
+        
+        cursor.execute(delete_query, (category, topic, target_grade, difficulty))
+        deleted_count = cursor.rowcount
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        logger.info(f"Successfully deleted {deleted_count} chunks.")
+        
+        return {
+            "message": "Vectors deleted successfully.",
+            "chunks_removed": deleted_count
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to delete vectors: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
