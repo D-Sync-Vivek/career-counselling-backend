@@ -6,7 +6,8 @@ from typing import List
 
 from core.database import get_db
 from api.deps import get_current_user
-from models.users import User, Profile
+from models.users import User
+from models.compass import Profile
 from schemas.assessments import PersonalityTestSubmission, PersonalityScoringResult, TraitScores
 
 logger = logging.getLogger(__name__)

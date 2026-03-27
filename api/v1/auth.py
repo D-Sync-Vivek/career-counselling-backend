@@ -6,7 +6,9 @@ from datetime import timedelta
 
 from core.database import get_db
 from core.security import get_password_hash, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
-from models.users import User, Profile, Mentor, UserRole
+from models.users import User, UserRole
+from models.compass import Profile
+from models.mentorship import Mentor
 from schemas.user import UserCreate, UserResponse, Token
 
 logger = logging.getLogger(__name__)
