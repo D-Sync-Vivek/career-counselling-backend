@@ -1,16 +1,15 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, time, date
 from uuid import UUID
 from typing import List, Optional
 
 from fastapi import (
-    APIRouter, Depends, HTTPException, Query,
-    WebSocket, WebSocketDisconnect,
+    APIRouter, Depends, HTTPException, Query, 
+    WebSocket, WebSocketDisconnect, status
 )
 from jose import jwt, JWTError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 from sentence_transformers import SentenceTransformer
 
 from core.database import get_db
@@ -19,17 +18,25 @@ from api.deps import get_current_user
 from models.users import User, UserRole
 from models.mentorship import (
     Mentor, MentorAvailability, SessionLog, 
-    ChatMessage, MentorFeedback, MentorshipRequest
+    ChatMessage, MentorshipRequest
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["Mentorship"])
 
-# Load the ML model globally for efficiency (loads once on startup)
-# all-MiniLM-L6-v2 produces 384-dimensional vectors
+# Semantic Search Model
 embed_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# ── WebSocket connection manager ─────────────────────────────────────────────
+# ── Utilities ──────────────────────────────────────────────────────────────
+
+def get_next_weekday(start_date: date, weekday: int):
+    """weekday: 1=Mon, 7=Sun."""
+    days_ahead = (weekday - 1) - start_date.weekday()
+    if days_ahead <= 0: 
+        days_ahead += 7
+    return start_date + timedelta(days_ahead)
+
+# ── Connection Manager ──────────────────────────────────────────────────────
 
 class ConnectionManager:
     def __init__(self):
@@ -40,161 +47,202 @@ class ConnectionManager:
         self._rooms.setdefault(room, []).append(ws)
 
     def disconnect(self, room: str, ws: WebSocket):
-        room_list = self._rooms.get(room, [])
-        if ws in room_list:
-            room_list.remove(ws)
+        if ws in self._rooms.get(room, []):
+            self._rooms[room].remove(ws)
 
     async def broadcast(self, room: str, payload: dict):
         for ws in self._rooms.get(room, []):
-            await ws.send_json(payload)
+            try:
+                await ws.send_json(payload)
+            except:
+                pass
 
 manager = ConnectionManager()
 
-# ── Mentor Profile Logic ───────────────────────────────────────────────────
+# ── SCHEMAS ────────────────────────────────────────────────────────────────
+
+class MentorResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    expertise: str
+    bio: Optional[str] = None
+    years_experience: int
+    rating: float
+    is_verified: bool
+    class Config:
+        from_attributes = True
 
 class MentorProfileIn(BaseModel):
     expertise: str
     bio: Optional[str] = None
     years_experience: int = 0
 
+class AvailabilitySlotIn(BaseModel):
+    day_of_week: int = Field(..., ge=1, le=7)
+    start_time: time
+    end_time: time
+
+class MentorAvailabilityUpdate(BaseModel):
+    slots: List[AvailabilitySlotIn]
+
+class RequestIn(BaseModel):
+    mentor_id: UUID
+    availability_id: UUID 
+    message: Optional[str] = None
+
+class UpcomingSessionResponse(BaseModel):
+    session_id: UUID
+    scheduled_at: datetime
+    other_party_name: str
+    is_live: bool
+    seconds_until_start: int
+
+# ── PROFILE & AI SEARCH ───────────────────────────────────────────────────
+
 @router.post("/profiles/mentors/", status_code=201)
-def create_mentor_profile(
-    body: MentorProfileIn,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+def create_mentor_profile(body: MentorProfileIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.role != UserRole.MENTOR:
-        raise HTTPException(status_code=403, detail="Only mentors can create a profile.")
-
-    if db.query(Mentor).filter(Mentor.user_id == current_user.id).first():
-        raise HTTPException(status_code=409, detail="Mentor profile already exists.")
-
-    # STEP: Generate the semantic vector from the expertise text
-    vector_data = embed_model.encode(body.expertise).tolist()
-
+        raise HTTPException(status_code=403, detail="Mentor role required.")
+    
+    vector = embed_model.encode(body.expertise).tolist()
     mentor = Mentor(
         user_id=current_user.id,
         expertise=body.expertise,
-        expertise_vector=vector_data,
+        expertise_vector=vector,
         bio=body.bio,
         years_experience=body.years_experience,
-        is_verified=True # Auto-verified for immediate access
+        is_verified=True
     )
-    
     db.add(mentor)
     db.commit()
-    db.refresh(mentor)
-    return {"mentor_id": str(mentor.id), "message": "AI-indexed profile created."}
+    return {"message": "AI-indexed profile created."}
 
-# ── Semantic Search Route ──────────────────────────────────────────────────
-
-@router.get("/mentorship/search/")
-def search_mentors(
-    career_goal: str = Query(..., description="The student's career interest or goal"),
-    limit: int = 5,
-    db: Session = Depends(get_db)
-):
-    # 1. Convert the search string into a vector
+@router.get("/mentorship/search/", response_model=List[MentorResponse])
+def search_mentors(career_goal: str = Query(...), db: Session = Depends(get_db)):
     search_vector = embed_model.encode(career_goal).tolist()
-
-    # 2. Use PGVector's Cosine Distance operator (<=>) to find matches
-    # This finds mentors who ARE conceptually similar even if keywords don't match
     results = (
         db.query(Mentor)
         .filter(Mentor.is_verified == True)
         .order_by(Mentor.expertise_vector.cosine_distance(search_vector))
-        .limit(limit)
+        .limit(5).all()
+    )
+    return results
+
+# ── MENTOR AVAILABILITY ───────────────────────────────────────────────────
+
+@router.post("/availability/", status_code=201)
+def set_mentor_availability(body: MentorAvailabilityUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.role != UserRole.MENTOR:
+        raise HTTPException(status_code=403)
+
+    mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
+    if not mentor: raise HTTPException(status_code=404)
+
+    db.query(MentorAvailability).filter(MentorAvailability.mentor_id == mentor.id, MentorAvailability.is_booked == False).delete()
+
+    new_slots = []
+    for slot in body.slots:
+        current_start = datetime.combine(date.today(), slot.start_time)
+        actual_end = datetime.combine(date.today(), slot.end_time)
+        while current_start + timedelta(hours=1) <= actual_end:
+            new_slots.append(MentorAvailability(
+                mentor_id=mentor.id, day_of_week=slot.day_of_week,
+                start_time=current_start.time(), end_time=(current_start + timedelta(hours=1)).time()
+            ))
+            current_start += timedelta(hours=1)
+
+    db.add_all(new_slots)
+    db.commit()
+    return {"message": f"Created {len(new_slots)} atomic slots."}
+
+# ── REQUESTS & DASHBOARD ───────────────────────────────────────────────────
+
+@router.get("/requests/pending/")
+def get_pending_requests(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
+    if not mentor: raise HTTPException(status_code=403)
+
+    pending = (
+        db.query(MentorshipRequest, User.full_name, MentorAvailability)
+        .join(User, MentorshipRequest.student_id == User.id)
+        .join(MentorAvailability, MentorshipRequest.availability_id == MentorAvailability.id)
+        .filter(MentorshipRequest.mentor_id == mentor.id, MentorshipRequest.status == "pending")
         .all()
     )
+    return [{"request_id": r[0].id, "student_name": r[1], "time_slot": f"Day {r[2].day_of_week}: {r[2].start_time}"} for r in pending]
 
-    return [
-        {
-            "mentor_id": str(m.id),
-            "expertise": m.expertise,
-            "bio": m.bio,
-            "years_experience": m.years_experience,
-            "rating": m.rating,
-        }
-        for m in results
-    ]
+@router.get("/sessions/upcoming", response_model=List[UpcomingSessionResponse])
+def get_upcoming_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    now = datetime.now()
+    sessions = db.query(SessionLog).filter(
+        ((SessionLog.student_id == current_user.id) | (SessionLog.mentor_id == current_user.id)),
+        SessionLog.status == "scheduled",
+        SessionLog.scheduled_at >= (now - timedelta(hours=1))
+    ).all()
 
-# ── Availability Management ────────────────────────────────────────────────
+    res = []
+    for s in sessions:
+        other_id = s.mentor_id if current_user.id == s.student_id else s.student_id
+        other_user = db.query(User).filter(User.id == other_id).first()
+        res.append({
+            "session_id": s.id,
+            "scheduled_at": s.scheduled_at,
+            "other_party_name": other_user.full_name if other_user else "User",
+            "is_live": now >= s.scheduled_at,
+            "seconds_until_start": int((s.scheduled_at - now).total_seconds())
+        })
+    return res
 
-class AvailabilityIn(BaseModel):
-    day_of_week: int   # 1=Mon, 7=Sun
-    start_time: str    # "HH:MM"
-    end_time: str      # "HH:MM"
-
-@router.post("/mentorship/availability/", status_code=201)
-def set_availability(
-    body: AvailabilityIn,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+@router.post("/requests/{request_id}/approve")
+async def approve_request(request_id: UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
-    if not mentor or not mentor.is_verified:
-        raise HTTPException(status_code=403, detail="Active mentor profile required.")
-
-    try:
-        start = datetime.strptime(body.start_time, "%H:%M").time()
-        end = datetime.strptime(body.end_time, "%H:%M").time()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Use HH:MM format.")
-
-    slot = MentorAvailability(
-        mentor_id=mentor.id,
-        day_of_week=body.day_of_week,
-        start_time=start,
-        end_time=end
-    )
-    db.add(slot)
-    db.commit()
-    return {"message": "Availability set successfully."}
-
-# ── Mentorship Requests (The Handshake) ────────────────────────────────────
-
-class RequestIn(BaseModel):
-    mentor_id: UUID
-    availability_id: UUID
-    message: str
-
-@router.post("/mentorship/requests/", status_code=201)
-def request_mentorship(
-    body: RequestIn,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.role != UserRole.STUDENT:
-        raise HTTPException(status_code=403, detail="Only students can request mentorship.")
-
-    # Verify slot availability
-    slot = db.query(MentorAvailability).filter(
-        MentorAvailability.id == body.availability_id,
-        MentorAvailability.is_booked == False
-    ).first()
+    req = db.query(MentorshipRequest).filter(MentorshipRequest.id == request_id).first()
     
-    if not slot:
-        raise HTTPException(status_code=400, detail="Slot is no longer available.")
-
-    new_request = MentorshipRequest(
-        student_id=current_user.id,
-        mentor_id=body.mentor_id,
-        availability_id=body.availability_id,
-        message=body.message
+    if not req or req.mentor_id != mentor.id: raise HTTPException(status_code=404)
+    slot = db.query(MentorAvailability).filter(MentorAvailability.id == req.availability_id).first()
+    
+    slot.is_booked = True
+    req.status = "approved"
+    session_date = get_next_weekday(date.today(), slot.day_of_week)
+    
+    session = SessionLog(
+        student_id=req.student_id, mentor_id=req.mentor_id, 
+        scheduled_at=datetime.combine(session_date, slot.start_time),
+        status="scheduled"
     )
-    db.add(new_request)
+    db.add(session)
     db.commit()
-    return {"message": "Request sent to mentor."}
+    return {"session_id": session.id, "scheduled_at": session.scheduled_at}
 
-# ── WebSocket Chat ──────────────────────────────────────────────────────────
+# ── SESSION CONTROL & WEBSOCKET ───────────────────────────────────────────
+
+@router.post("/sessions/{session_id}/end")
+async def end_session(session_id: UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Only the Mentor can officially trigger the end-of-session workflow."""
+    session = db.query(SessionLog).filter(SessionLog.id == session_id).first()
+    if not session: raise HTTPException(status_code=404)
+
+    # Validate that the person ending it is the mentor for this session
+    mentor_profile = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
+    if not mentor_profile or session.mentor_id != mentor_profile.id:
+        raise HTTPException(status_code=403, detail="Only the mentor can end this session.")
+
+    # 1. Update DB Status
+    session.status = "completed"
+    db.commit()
+
+    # 2. Broadcast 'SESSION_ENDED' event to the Room
+    # Both student and mentor UI will listen for this to show feedback/close chat
+    await manager.broadcast(str(session_id), {
+        "event": "SESSION_ENDED",
+        "message": "The mentor has concluded the session. Redirecting to feedback...",
+        "session_id": str(session_id)
+    })
+    
+    return {"message": "Session marked as completed."}
 
 @router.websocket("/mentorship/sessions/{session_id}/chat/")
-async def websocket_chat(
-    websocket: WebSocket,
-    session_id: UUID,
-    token: str = Query(...),
-    db: Session = Depends(get_db),
-):
+async def websocket_chat(websocket: WebSocket, session_id: UUID, token: str = Query(...), db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
@@ -209,30 +257,37 @@ async def websocket_chat(
         await websocket.close(code=1008)
         return
 
-    mentor = db.query(Mentor).filter(Mentor.id == session.mentor_id).first()
-    is_participant = session.student_id == user.id or (mentor and mentor.user_id == user.id)
-    
-    if not is_participant:
-        await websocket.close(code=1008)
+    # Gatekeeper: Block early entry (More than 2 mins before)
+    now = datetime.now()
+    if now < (session.scheduled_at - timedelta(minutes=2)):
+        await websocket.accept()
+        await websocket.send_json({"event": "ERROR", "message": "Room is still locked."})
+        await websocket.close(code=4003)
         return
 
-    room = str(session_id)
-    await manager.connect(room, websocket)
+    # Block if session is already concluded
+    if session.status == "completed":
+        await websocket.accept()
+        await websocket.send_json({"event": "ERROR", "message": "This session has already ended."})
+        await websocket.close(code=4003)
+        return
+
+    await manager.connect(str(session_id), websocket)
 
     try:
         while True:
             data = await websocket.receive_json()
-            text = (data.get("message") or "").strip()
-            if not text: continue
-
-            msg = ChatMessage(session_id=session_id, sender_id=user.id, message=text)
-            db.add(msg)
-            db.commit()
-
-            await manager.broadcast(room, {
-                "sender_id": str(user.id),
-                "message": text,
-                "sent_at": datetime.now().isoformat()
-            })
+            msg_text = data.get('message', '').strip()
+            if msg_text:
+                # Store message in DB
+                db.add(ChatMessage(session_id=session_id, sender_id=user.id, message=msg_text))
+                db.commit()
+                # Broadcast real-time
+                await manager.broadcast(str(session_id), {
+                    "event": "NEW_MESSAGE",
+                    "sender": user.full_name, 
+                    "message": msg_text,
+                    "timestamp": datetime.now().isoformat()
+                })
     except WebSocketDisconnect:
-        manager.disconnect(room, websocket)
+        manager.disconnect(str(session_id), websocket)
