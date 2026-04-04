@@ -48,12 +48,14 @@ class SessionLog(Base):
     duration_minutes = Column(Integer, default=60)
     status = Column(String, default="scheduled")
     meeting_url = Column(String, nullable=True)
+    dyte_meeting_id = Column(String, nullable=True)
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    session_id = Column(UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"))
-    sender_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
+    student_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    mentor_id = Column(UUID(as_uuid=True), ForeignKey("mentors.id", ondelete="CASCADE"), nullable=False)
+    sender_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     message = Column(Text, nullable=False)
     sent_at = Column(DateTime(timezone=True), server_default=func.now())
 

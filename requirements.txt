@@ -11,4 +11,10 @@ pypdf
 langchain-openai
 openai
 pymupdf
-
+python-jose[cryptography]
+bcrypt
+pydantic[email]
+python-multipart
+sqlalchemy
+httpx
+websockets

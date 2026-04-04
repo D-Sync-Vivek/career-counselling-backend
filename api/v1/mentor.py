@@ -1,10 +1,13 @@
+import base64
 import logging
-from datetime import datetime, timedelta, time, date,timezone
+import os
+from datetime import datetime, timedelta, time, date, timezone
 from uuid import UUID
 from typing import List, Optional
 
+import httpx
 from fastapi import (
-    APIRouter, Depends, HTTPException, Query, 
+    APIRouter, Depends, HTTPException, Query,
     WebSocket, WebSocketDisconnect, status
 )
 from jose import jwt, JWTError
@@ -18,9 +21,18 @@ from core.security import SECRET_KEY, ALGORITHM
 from api.deps import get_current_user
 from models.users import User, UserRole
 from models.mentorship import (
-    Mentor, MentorAvailability, SessionLog, 
+    Mentor, MentorAvailability, SessionLog,
     ChatMessage, MentorshipRequest
 )
+
+# ── Dyte Configuration ────────────────────────────────────────────────────────
+DYTE_ORG_ID = os.getenv("DYTE_ORG_ID", "")
+DYTE_API_KEY = os.getenv("DYTE_API_KEY", "")
+DYTE_BASE_URL = "https://api.dyte.io/v2"
+
+def _dyte_headers() -> dict:
+    token = base64.b64encode(f"{DYTE_ORG_ID}:{DYTE_API_KEY}".encode()).decode()
+    return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["Mentorship"])
@@ -98,6 +110,7 @@ class UpcomingSessionResponse(BaseModel):
     session_id: UUID
     scheduled_at: datetime
     other_party_name: str
+    other_user_id: UUID
     is_live: bool
     seconds_until_start: int
 
@@ -227,12 +240,17 @@ def get_upcoming_sessions(current_user: User = Depends(get_current_user), db: Se
     res = []
     for s in sessions:
         other_user_name = "User"
+        other_user_id = None
         if mentor_id and s.mentor_id == mentor_id:
+            # Current user is the mentor — other party is the student
             student_user = db.query(User).filter(User.id == s.student_id).first()
             other_user_name = student_user.full_name if student_user else "Student"
+            other_user_id = student_user.id if student_user else None
         else:
+            # Current user is the student — other party is the mentor's user account
             mentor_user = db.query(User).join(Mentor).filter(Mentor.id == s.mentor_id).first()
             other_user_name = mentor_user.full_name if mentor_user else "Mentor"
+            other_user_id = mentor_user.id if mentor_user else None
 
         sch_naive = s.scheduled_at.replace(tzinfo=None)
         is_live = now >= (sch_naive - timedelta(minutes=5))
@@ -240,114 +258,101 @@ def get_upcoming_sessions(current_user: User = Depends(get_current_user), db: Se
 
         res.append({
             "session_id": s.id, "scheduled_at": sch_naive,
-            "other_party_name": other_user_name, "is_live": is_live,
+            "other_party_name": other_user_name,
+            "other_user_id": other_user_id,
+            "is_live": is_live,
             "seconds_until_start": seconds_until_start
         })
     return res
 
 # ── CHAT & REAL-TIME ──────────────────────────────────────────────────────
 
-@router.websocket("/mentorship/sessions/{session_id}/chat/")
+@router.websocket("/mentorship/chat/{other_user_id}/")
 async def websocket_chat(
-    websocket: WebSocket, 
-    session_id: UUID, 
-    token: str = Query(...), 
+    websocket: WebSocket,
+    other_user_id: UUID,
+    token: str = Query(...),
     db: Session = Depends(get_db)
 ):
-    # 1. PRE-ACCEPT AUTHENTICATION (Security Firewall)
+    # 1. PRE-ACCEPT AUTHENTICATION
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_email = payload.get("sub")
         if not user_email:
             raise JWTError
     except JWTError:
-        # Rejects handshake immediately without leaving a "hanging" socket
-        return 
+        return
 
-    # 2. DATA CONSISTENCY CHECK
     user = db.query(User).filter(User.email == user_email).first()
-    session = db.query(SessionLog).filter(SessionLog.id == session_id).first()
-    
-    if not user or not session:
-        return # Session or User does not exist in DB
+    other_user = db.query(User).filter(User.id == other_user_id).first()
+    if not user or not other_user:
+        return
 
-    # 3. BULLETPROOF TIME LOGIC (UTC ONLY)
-    # Get current UTC time (Aware object)
-    now_utc = datetime.now(timezone.utc)
-    
-    # Force DB timestamp to be UTC Aware
-    sch_utc = session.scheduled_at
-    if sch_utc.tzinfo is None:
-        sch_utc = sch_utc.replace(tzinfo=timezone.utc)
+    # 2. DETERMINE STUDENT / MENTOR ROLES
+    current_mentor = db.query(Mentor).filter(Mentor.user_id == user.id).first()
+    other_mentor = db.query(Mentor).filter(Mentor.user_id == other_user_id).first()
 
-    # Calculate 'Unlocking Time' (exactly 2 mins before the scheduled start)
-    # Example: Scheduled 09:30 UTC -> Unlocks at 09:28 UTC
-    unlock_time = sch_utc - timedelta(minutes=2)
-
-    # --- EDGE CASE 1: Joining too early ---
-    # If it is 2:50 PM IST and start is 3:00 PM IST, block access.
-    if now_utc < unlock_time:
+    if current_mentor and not other_mentor:
+        mentor_profile_id = current_mentor.id
+        student_user_id = other_user_id
+    elif other_mentor and not current_mentor:
+        mentor_profile_id = other_mentor.id
+        student_user_id = user.id
+    else:
+        # Both mentors, or neither — relationship is ambiguous
         await websocket.accept()
-        await websocket.send_json({
-            "event": "ERROR", 
-            "message": f"Room opens 2 mins before start. (Server: {now_utc.strftime('%H:%M')} UTC)"
-        })
+        await websocket.send_json({"event": "ERROR", "message": "Could not resolve mentor/student relationship."})
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    # --- EDGE CASE 2: Session already completed ---
-    # Even if the time is right, if the status is 'completed', block entry.
-    if session.status == "completed":
+    # 3. AUTHORIZATION — must have an approved mentorship link
+    approved = db.query(MentorshipRequest).filter(
+        MentorshipRequest.student_id == student_user_id,
+        MentorshipRequest.mentor_id == mentor_profile_id,
+        MentorshipRequest.status == "approved"
+    ).first()
+    if not approved:
         await websocket.accept()
-        await websocket.send_json({
-            "event": "ERROR", 
-            "message": "This session has already concluded."
-        })
+        await websocket.send_json({"event": "ERROR", "message": "No approved mentorship relationship found."})
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    # --- EDGE CASE 3: Late Joiner (The "Whenever" Rule) ---
-    # If now_utc >= unlock_time AND status != 'completed', the door is OPEN.
-    # This naturally handles 3:05 PM, 3:45 PM, etc.
+    # 4. CANONICAL ROOM KEY (same room regardless of who connects first)
+    ids = sorted([str(user.id), str(other_user_id)])
+    room = f"{ids[0]}_{ids[1]}"
 
-    # 4. ESTABLISH WEBSOCKET CONNECTION
     await websocket.accept()
-    await manager.connect(str(session_id), websocket)
-    
+    await manager.connect(room, websocket)
+
     try:
         while True:
-            # Wait for incoming JSON message
             data = await websocket.receive_json()
-            msg_text = data.get('message', '').strip()
-            
+            msg_text = data.get("message", "").strip()
             if msg_text:
                 try:
-                    # 5. ATOMIC DB PERSISTENCE
                     new_msg = ChatMessage(
-                        session_id=session_id, 
-                        sender_id=user.id, 
+                        student_id=student_user_id,
+                        mentor_id=mentor_profile_id,
+                        sender_id=user.id,
                         message=msg_text
                     )
                     db.add(new_msg)
                     db.commit()
-                    
-                    # 6. REAL-TIME BROADCAST
-                    await manager.broadcast(str(session_id), {
-                        "event": "NEW_MESSAGE", 
-                        "sender": user.full_name, 
-                        "message": msg_text, 
+                    await manager.broadcast(room, {
+                        "event": "NEW_MESSAGE",
+                        "sender": user.full_name,
+                        "message": msg_text,
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     })
                 except Exception as e:
                     db.rollback()
                     logger.error(f"Persistence Failure: {e}")
-                    # Optionally notify user message failed to save
-    
+
     except WebSocketDisconnect:
-        manager.disconnect(str(session_id), websocket)
+        manager.disconnect(room, websocket)
     except Exception as e:
         logger.error(f"WebSocket Runtime Error: {e}")
-        manager.disconnect(str(session_id), websocket)
+        manager.disconnect(room, websocket)
 # ── REQUEST MANAGEMENT ────────────────────────────────────────────────────
 
 @router.get("/requests/pending/")
@@ -380,25 +385,104 @@ def request_mentorship(body: RequestIn, current_user: User = Depends(get_current
 async def approve_request(request_id: UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
     req = db.query(MentorshipRequest).filter(MentorshipRequest.id == request_id).first()
-    if not req or req.mentor_id != mentor.id: raise HTTPException(status_code=404)
-    
+    if not req or req.mentor_id != mentor.id:
+        raise HTTPException(status_code=404)
+
     slot = db.query(MentorAvailability).filter(MentorAvailability.id == req.availability_id).first()
-    slot.is_booked = True; req.status = "approved"
-    
+    slot.is_booked = True
+    req.status = "approved"
+
+    # Create a Dyte video meeting for this session
+    dyte_meeting_id = None
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{DYTE_BASE_URL}/meetings",
+                json={"title": f"Mentorship Session - {current_user.full_name}"},
+                headers=_dyte_headers(),
+                timeout=10.0
+            )
+            resp.raise_for_status()
+            dyte_meeting_id = resp.json()["data"]["id"]
+    except Exception as e:
+        logger.error(f"Dyte meeting creation failed: {e}")
+        # Session is still created even if Dyte fails; join-video will surface the error
+
     session_date = get_next_weekday(date.today(), slot.day_of_week)
-    session = SessionLog(student_id=req.student_id, mentor_id=req.mentor_id, scheduled_at=datetime.combine(session_date, slot.start_time), status="scheduled")
-    db.add(session); db.commit()
-    return {"session_id": session.id, "scheduled_at": session.scheduled_at}
+    session = SessionLog(
+        student_id=req.student_id,
+        mentor_id=req.mentor_id,
+        scheduled_at=datetime.combine(session_date, slot.start_time),
+        status="scheduled",
+        dyte_meeting_id=dyte_meeting_id
+    )
+    db.add(session)
+    db.commit()
+    return {"session_id": session.id, "scheduled_at": session.scheduled_at, "dyte_meeting_id": dyte_meeting_id}
 
 @router.post("/sessions/{session_id}/end")
 async def end_session(session_id: UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     session = db.query(SessionLog).filter(SessionLog.id == session_id).first()
     mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
-    if not session or session.mentor_id != mentor.id: raise HTTPException(status_code=403)
+    if not session or session.mentor_id != mentor.id:
+        raise HTTPException(status_code=403)
 
-    session.status = "completed"; db.commit()
+    session.status = "completed"
+    db.commit()
     await manager.broadcast(str(session_id), {"event": "SESSION_ENDED", "message": "Concluded.", "session_id": str(session_id)})
     return {"message": "Session completed."}
+
+@router.post("/sessions/{session_id}/join-video")
+async def join_video_session(session_id: UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    session = db.query(SessionLog).filter(SessionLog.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    mentor_profile = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
+    is_mentor = mentor_profile is not None and session.mentor_id == mentor_profile.id
+    is_student = session.student_id == current_user.id
+
+    if not is_mentor and not is_student:
+        raise HTTPException(status_code=403, detail="Not authorized for this session.")
+
+    # If no Dyte meeting exists yet (e.g. session pre-dates Dyte integration), create one now
+    if not session.dyte_meeting_id:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{DYTE_BASE_URL}/meetings",
+                    json={"title": f"Mentorship Session - {session_id}"},
+                    headers=_dyte_headers(),
+                    timeout=10.0,
+                )
+                resp.raise_for_status()
+                session.dyte_meeting_id = resp.json()["data"]["id"]
+                db.commit()
+        except Exception as e:
+            logger.error(f"Dyte meeting creation failed on join: {e}")
+            raise HTTPException(status_code=500, detail="Could not create video meeting. Check Dyte credentials.")
+
+    preset_name = "group_call_host" if is_mentor else "group_call_participant"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{DYTE_BASE_URL}/meetings/{session.dyte_meeting_id}/participants",
+                json={
+                    "name": current_user.full_name,
+                    "custom_participant_id": str(current_user.id),
+                    "preset_name": preset_name,
+                },
+                headers=_dyte_headers(),
+                timeout=10.0
+            )
+            resp.raise_for_status()
+            participant_token = resp.json()["data"]["token"]
+    except Exception as e:
+        logger.error(f"Dyte participant token generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate video token.")
+
+    return {"token": participant_token, "meeting_id": session.dyte_meeting_id}
 
 @router.get("/availability/{mentor_id}")
 def get_mentor_availability(mentor_id: UUID, db: Session = Depends(get_db)):
