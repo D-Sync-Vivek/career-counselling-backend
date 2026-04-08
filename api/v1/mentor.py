@@ -185,10 +185,22 @@ def create_mentor_profile(body: MentorProfileIn, current_user: User = Depends(ge
 def get_my_mentor_profile(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.role != UserRole.MENTOR:
         raise HTTPException(status_code=403, detail="Mentor role required.")
+        
     mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
     if not mentor:
         raise HTTPException(status_code=404, detail="Mentor profile not found.")
-    return mentor
+        
+    # FIX: Return a dictionary that injects the full_name from current_user
+    return {
+        "id": mentor.id,
+        "user_id": mentor.user_id,
+        "expertise": mentor.expertise,
+        "rating": mentor.rating,
+        "is_verified": mentor.is_verified,
+        "bio": mentor.bio,
+        "years_experience": mentor.years_experience,
+        "full_name": current_user.full_name  # <-- Grabbed directly from auth!
+    }
 
 @router.get("/mentorship/search/", response_model=List[MentorResponse])
 def search_mentors(career_goal: str = Query(...), db: Session = Depends(get_db)):
