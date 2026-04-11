@@ -23,7 +23,7 @@ from models.roadmap import Roadmap, RoadmapPhase, RoadmapTask
 from models.mentor import Mentor, MentorAvailability, MentorshipRequest, SessionLog, ChatMessage, MentorFeedback, ParentFeedback, ParentStudentLink
 from models.profile import Profile, AcademicProfile, PsychometricProfile, LifestyleProfile, FinancialProfile, AspirationProfile
 from models.career import Career, Skill, CareerSkill, UserSkill, StudentInsight
-from models.test import Test, Result
+from models.assessment import Test, Result
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 logger = logging.getLogger(__name__)
