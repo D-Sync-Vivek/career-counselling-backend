@@ -16,13 +16,25 @@ from router.personality import router as personality_router
 from api.v1.mentor import router as mentor_router
 from api.v1.parent import router as parent_router
 from api.v1.chat import router as chat_router, purge_old_messages_loop
-
+# --- NEW IMPORTS FOR DATABASE CREATION ---
+from core.database import engine, Base
+from models.users import User  # Importing this ensures SQLAlchemy knows the table exists before creating
+from models.roadmap import Roadmap, RoadmapPhase, RoadmapTask
+from models.mentor import Mentor, MentorAvailability, MentorshipRequest, SessionLog, ChatMessage, MentorFeedback, ParentFeedback, ParentStudentLink
+from models.profile import Profile, AcademicProfile, PsychometricProfile, LifestyleProfile, FinancialProfile, AspirationProfile
+from models.career import Career, Skill, CareerSkill, UserSkill, StudentInsight
+from models.test import Test, Result
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # --- ADD THIS LINE TO CREATE TABLES ---
+    Base.metadata.create_all(bind=engine)
+    logger.info("Database tables created successfully.")
+    
     # Start the 24h message cleanup background task on server boot
     task = asyncio.create_task(purge_old_messages_loop())
     logger.info("Chat cleanup task started.")
