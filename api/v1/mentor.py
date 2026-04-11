@@ -14,7 +14,7 @@ from jose import jwt, JWTError
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
-from sentence_transformers import SentenceTransformer
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from core.database import get_db
 from core.security import SECRET_KEY, ALGORITHM
@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["Mentorship"])
 
 # Semantic Search Model
-embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+# Semantic Search Model
+embed_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 # ── Utilities ──────────────────────────────────────────────────────────────
 
@@ -153,7 +154,7 @@ def create_mentor_profile(body: MentorProfileIn, current_user: User = Depends(ge
         raise HTTPException(status_code=403, detail="Mentor role required.")
     
     try:
-        vector = embed_model.encode(body.expertise).tolist()
+        vector = embed_model.embed_query(body.expertise)
         mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
         
         if mentor:
@@ -204,7 +205,7 @@ def get_my_mentor_profile(current_user: User = Depends(get_current_user), db: Se
 
 @router.get("/mentorship/search/", response_model=List[MentorResponse])
 def search_mentors(career_goal: str = Query(...), db: Session = Depends(get_db)):
-    search_vector = embed_model.encode(career_goal).tolist()
+    search_vector = embed_model.embed_query(career_goal)
     results = (
         db.query(Mentor)
         .options(joinedload(Mentor.user))

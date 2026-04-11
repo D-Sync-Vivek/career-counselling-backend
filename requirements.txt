@@ -1,3 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 fastapi
 uvicorn[standard]
 
@@ -13,11 +15,15 @@ pydantic
 email-validator
 
 httpx
-
 websockets
 
 langchain-core
 langchain-openai
 langchain-community
+langchain-huggingface
+
+sentence-transformers
+torch
 
 pgvector
+python-multipart
