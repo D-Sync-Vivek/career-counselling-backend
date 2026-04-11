@@ -42,13 +42,15 @@ app = FastAPI(
 )
 
 # CORS configuration for React frontend
-origins = ["*"]
+origins = [
+    "http://187.127.139.208:5173",  # Your VPS Frontend
+    "http://localhost:5173"         # Keep this if you still code locally
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    # 2. IMPORTANT: If allow_origins is ["*"], allow_credentials MUST be False
-    allow_credentials=True, 
+    allow_origins=origins,   # Use the specific origins list
+    allow_credentials=True,  # Now this is safe and legal
     allow_methods=["*"],
     allow_headers=["*"],
 )
