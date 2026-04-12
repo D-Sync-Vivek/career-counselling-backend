@@ -1,19 +1,4 @@
 services:
-  # Database Service
-  db:
-    image: postgres:15-alpine
-    container_name: career-ai-db
-    restart: always
-    environment:
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
-      POSTGRES_DB: ${DB_NAME:-career_ai}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-  # FastAPI Backend Service
   backend:
     build:
       context: .
@@ -21,14 +6,12 @@ services:
     container_name: career-ai-backend
     restart: always
     environment:
-      # This connects the FastAPI app to the 'db' service above
-      - DATABASE_URL=postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-password}@db:5432/${DB_NAME:-career_ai}
-      # Your Gemini API Key
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # We will put the real keys directly in Hostinger!
+      - DATABASE_URL=postgresql://neondb_owner:npg_9zHMZ3WAvpFP@ep-billowing-hall-a8ma5mt0-pooler.eastus2.azure.neon.tech/neondb?sslmode=require
+      - DEEPSEEK_API_KEY=add_in_hostinger
+      - GROQ_API_KEY=add_in_hostinger
+      - SECRET_KEY=09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7
+      - ALGORITHM=HS256
+      - ACCESS_TOKEN_EXPIRE_MINUTES=1440
     ports:
       - "8000:8000"
-    depends_on:
-      - db
-
-volumes:
-  postgres_data:
