@@ -13,17 +13,18 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 logger = logging.getLogger(__name__)
 
 # Registry for all module types and their data sources
+# Removed UUIDs - now using just table names
 MODULE_REGISTRY = {
-    "profile": {"type": "template", "table": "profiles", "uuid": "00000000-0000-0000-0000-000000000001"},
-    "academic": {"type": "template", "table": "academic_profiles", "uuid": "00000000-0000-0000-0000-000000000002"},
-    "psychometric": {"type": "template", "table": "psychometric_profiles", "uuid": "00000000-0000-0000-0000-000000000003"},
-    "lifestyle": {"type": "template", "table": "lifestyle_profiles", "uuid": "00000000-0000-0000-0000-000000000004"},
-    "financial": {"type": "template", "table": "financial_profiles", "uuid": "00000000-0000-0000-0000-000000000005"},
-    "aspiration": {"type": "template", "table": "aspiration_profiles", "uuid": "00000000-0000-0000-0000-000000000006"},
-    "interests":{"type":"template","table":"career_interest","uuid":"00000000-0000-0000-0000-000000000003"},
+    "profile": {"type": "template", "table": "profiles"},
+    "academic": {"type": "template", "table": "academic_profiles"},
+    "psychometric": {"type": "template", "table": "psychometric_profiles"},
+    "lifestyle": {"type": "template", "table": "lifestyle_profiles"},
+    "financial": {"type": "template", "table": "financial_profiles"},
+    "aspiration": {"type": "template", "table": "aspiration_profiles"},
+    "interests": {"type": "template", "table": "career_interest"},
     "personality": {"type": "bank", "table": "personality_question_bank", "limit": 35},
     "aptitude": {"type": "vector_bank", "table": "langchain_pg_embedding", "limit": 45},
-    "passion":{"type": "template", "table": "passion_strength","uuid":"00000000-0000-0000-0000-000000000007"},
+    "passion": {"type": "template", "table": "passion_strength"},
 }
 
 @router.get("/questions/{module_name}")
@@ -47,13 +48,14 @@ async def get_module_questions(
                 
                 # --- CASE 1: STATIC TEMPLATES (Lifestyle, Academic, etc.) ---
                 if module["type"] == "template":
+                    # Get the first row from the table (assuming it contains the question templates)
                     ignored_columns = ("id", "user_id", "updated_at", "focus_score", "discipline_score", "digital_risk_score")
-                    query = f"SELECT * FROM {module['table']} WHERE id = %s"
-                    cur.execute(query, (module["uuid"],))
+                    query = f"SELECT * FROM {module['table']} LIMIT 1"
+                    cur.execute(query)
                     row = cur.fetchone()
                     
                     if not row:
-                        raise HTTPException(status_code=404, detail="Template row not found in DB.")
+                        raise HTTPException(status_code=404, detail=f"No template row found in {module['table']}.")
                     
                     questions = {k: v for k, v in row.items() if k not in ignored_columns}
                     return {"status": "success", "module": module_name, "questions": questions}
@@ -63,7 +65,6 @@ async def get_module_questions(
                     if not target_grade:
                         raise HTTPException(status_code=400, detail="Target grade is required for aptitude questions.")
 
-                    # Safely casting the string to int within the query logic
                     apti_query = f"""
                         SELECT id, document as question_text, cmetadata 
                         FROM {module['table']} 
