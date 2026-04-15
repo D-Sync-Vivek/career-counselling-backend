@@ -24,7 +24,7 @@ from models.mentorship import (
     Mentor, MentorAvailability, SessionLog,
     ChatMessage, MentorshipRequest
 )
-
+IST = timezone(timedelta(hours=5, minutes=30))
 # ── Dyte Configuration ────────────────────────────────────────────────────────
 DYTE_ORG_ID = os.getenv("DYTE_ORG_ID", "")
 DYTE_API_KEY = os.getenv("DYTE_API_KEY", "")
@@ -263,7 +263,7 @@ def set_mentor_availability(body: MentorAvailabilityUpdate, current_user: User =
         MentorAvailability.is_booked == False
     ).delete()
 
-    now = datetime.now()
+    now = datetime.now(IST).replace(tzinfo=None)
     today = now.date()
     today_weekday = today.weekday() + 1
 
@@ -298,7 +298,7 @@ def set_mentor_availability(body: MentorAvailabilityUpdate, current_user: User =
 
 @router.get("/sessions/upcoming", response_model=List[UpcomingSessionResponse])
 def get_upcoming_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    now = datetime.now().replace(tzinfo=None)
+    now = datetime.now(IST).replace(tzinfo=None)
     mentor_profile = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
     mentor_id = mentor_profile.id if mentor_profile else None
 
@@ -480,7 +480,7 @@ async def approve_request(request_id: UUID, current_user: User = Depends(get_cur
         logger.error(f"Dyte meeting creation failed: {e}")
         # Session is still created even if Dyte fails; join-video will surface the error
 
-    session_date = get_next_weekday(date.today(), slot.day_of_week)
+    session_date = get_next_weekday(datetime.now(IST).date(), slot.day_of_week)
     session = SessionLog(
         student_id=req.student_id,
         mentor_id=req.mentor_id,
