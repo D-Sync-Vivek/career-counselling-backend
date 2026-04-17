@@ -37,4 +37,4 @@ bulk_upload.log
 .vscode/
 .idea/
 *.swp
-combined_project_code.txt
+combined_project_code.txt*.sql
