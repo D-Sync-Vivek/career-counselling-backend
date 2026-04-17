@@ -44,7 +44,7 @@ class MentorshipRequest(Base):
 class SessionLog(Base):
     __tablename__ = "sessions"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
+    student_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"),nullable=True)
     mentor_id = Column(UUID(as_uuid=True), ForeignKey("mentors.id", ondelete="CASCADE"))
     scheduled_at = Column(DateTime(timezone=True), nullable=False)
     duration_minutes = Column(Integer, default=60)
