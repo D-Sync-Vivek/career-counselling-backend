@@ -7,7 +7,7 @@ services:
     restart: always
     environment:
       # We will put the real keys directly in Hostinger!
-      - DATABASE_URL=postgresql://neondb_owner:npg_9zHMZ3WAvpFP@ep-billowing-hall-a8ma5mt0-pooler.eastus2.azure.neon.tech/neondb?sslmode=require
+      - DATABASE_URL=postgresql://grid:strongpassword@187.127.139.208:5432/career
       - DEEPSEEK_API_KEY=add_in_hostinger
       - GROQ_API_KEY=add_in_hostinger
       - SECRET_KEY=09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7
