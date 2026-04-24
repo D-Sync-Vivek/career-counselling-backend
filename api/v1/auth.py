@@ -62,7 +62,7 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
     
     return {"access_token": access_token, "token_type": "bearer"}
 
-@router.get("/users/me")
+@router.get("/users/me", response_model=UserResponse)
 def get_user_progress_and_data(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Returns the current user's profile completion status safely.
@@ -72,15 +72,18 @@ def get_user_progress_and_data(current_user: User = Depends(get_current_user), d
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
         
-    # We use getattr() with a default of {} to NEVER crash, 
-    # even if models/users.py is missing the column definition!
+    # We use getattr() with a default of {} to NEVER crash
     academic = getattr(user, 'academic_data', {}) or {}
     aptitude = getattr(user, 'apti_data', {}) or {}
     personality = getattr(user, 'personality_data', {}) or {}
     
-    # If they filled out their academic data, their basic profile is done!
+    # 👉 NEW: Safely grab the new 5D test data!
+    eq = getattr(user, 'eq_data', {}) or {}
+    orientation = getattr(user, 'orientation_data', {}) or {}
+    interest = getattr(user, 'career_interest_data', {}) or {}
+    
     return {
-        "user_id": user.id,
+        "id": user.id, # 👉 FIXED: Changed from user_id to id to match Pydantic & Frontend
         "email": user.email,
         "full_name": user.full_name,
         "role": user.role,
@@ -88,8 +91,13 @@ def get_user_progress_and_data(current_user: User = Depends(get_current_user), d
             "profile_done": len(academic) > 0, 
             "aptitude_done": len(aptitude) > 0,
             "personality_done": len(personality) > 0
-        }, # <--- ADD THIS EXACT COMMA
+        },
         "apti_data": aptitude,            
         "personality_data": personality,  
-        "academic_data": academic         
+        "academic_data": academic,
+        
+        # 👉 NEW: Send the new tests to the frontend so the green checkmarks unlock!
+        "eq_data": eq if len(eq) > 0 else None,
+        "orientation_data": orientation if len(orientation) > 0 else None,
+        "career_interest_data": interest if len(interest) > 0 else None
     }

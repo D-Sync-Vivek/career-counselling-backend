@@ -3,14 +3,17 @@ import json
 import logging
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException,Depends
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any
-
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.users import CareerDiscoveryReport # Assuming you placed the model here earlier
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
-
+from api.deps import get_current_user
+from models.users import User
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/reports", tags=["Report Generation"])
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -171,25 +174,30 @@ async def generate_comprehensive_report(request: GenerateReportRequest):
 # ==============================================================================
 # 3. GET REPORT ROUTE (For the Frontend to display the charts)
 # ==============================================================================
-@router.get("/{user_id}")
-async def get_user_report(user_id: str):
-    query = """
-    SELECT id, status, five_dimensions_data, career_matches_data, created_at 
-    FROM career_discovery_reports 
-    WHERE user_id = %s 
-    ORDER BY created_at DESC 
-    LIMIT 1;
-    """
+@router.get("/me")
+async def get_my_report(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     try:
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(query, (user_id,))
-                report = cur.fetchone()
-                
+        # Use SQLAlchemy to securely fetch the latest report for the logged-in user
+        report = db.query(CareerDiscoveryReport).filter(
+            CareerDiscoveryReport.user_id == current_user.id
+        ).order_by(CareerDiscoveryReport.created_at.desc()).first()
+        
         if not report:
             raise HTTPException(status_code=404, detail="No report found for this user.")
             
-        return report
+        return {
+            "id": str(report.id),
+            "status": report.status,
+            "five_dimensions_data": report.five_dimensions_data,
+            "career_matches_data": report.career_matches_data,
+            "created_at": report.created_at
+        }
+        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching report: {e}")
-        raise HTTPException(status_code=500, detail="Database error.")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")

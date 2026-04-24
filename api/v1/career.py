@@ -6,12 +6,16 @@ from sqlalchemy.orm import Session
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
-from sqlalchemy import select
+
+# 👉 FIXED 1: Added 'func' to the SQLAlchemy imports!
+from sqlalchemy import select, func 
+
 from models.careers import Career, StudentInsight
 from schemas.ai import CareerSelectRequest, CareerSelectResponse, SelectedCareerResponse
 from core.database import get_db
 from api.deps import get_current_user
 from models.users import User
+from models.roadmaps import Roadmap
 
 router = APIRouter(prefix="/api/v1/ai", tags=["DeepSeek Career Engine"])
 
@@ -30,7 +34,6 @@ async def generate_career_roadmap(
 ):
     u = current_user
     
-    # 1. Collect all confirmed JSONB data from the current user
     data = {
         "academic": u.academic_data,
         "lifestyle": u.lifestyle_data,
@@ -40,14 +43,12 @@ async def generate_career_roadmap(
         "financial": u.financial_data
     }
 
-    # 2. Basic Validation: Ensure critical data exists before calling AI
     if not u.academic_data or not u.lifestyle_data:
         raise HTTPException(
             status_code=400, 
             detail="Assessment data incomplete. Please fill out Academic and Lifestyle modules."
         )
 
-    # 3. AI Execution Configuration
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="DeepSeek API Key not configured in environment.")
@@ -67,20 +68,14 @@ async def generate_career_roadmap(
     ])
 
     try:
-        # 4. Generate AI response
         chain = prompt | llm | parser
         response = chain.invoke({
             "data": str(data), 
             "format_instructions": parser.get_format_instructions()
         })
-        
-        # NOTE: u.ai_insight_summary logic removed as requested.
-        # No db.commit() needed here since we aren't modifying the User record.
-        
         return response
         
     except Exception as e:
-        # Log the error for debugging
         print(f"AI Engine Error: {str(e)}")
         raise HTTPException(status_code=500, detail="The AI Career Engine failed to generate a response.")
     
@@ -90,19 +85,17 @@ async def select_career(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # 1. Find or Create the Career record
     career = db.query(Career).filter(Career.title == payload.career_title).first()
     
     if not career:
         career = Career(
             title=payload.career_title,
             description=f"AI recommended path for {payload.career_title}",
-            base_success_probability=0.7 # Default baseline
+            base_success_probability=0.7 
         )
         db.add(career)
-        db.flush() # Get the ID without committing yet
+        db.flush() 
 
-    # 2. Upsert into StudentInsight
     insight = db.query(StudentInsight).filter(StudentInsight.student_id == current_user.id).first()
     
     if insight:
@@ -115,6 +108,9 @@ async def select_career(
         )
         db.add(insight)
 
+    # 👉 FIXED 2: Added the roadmap deactivation logic back in!
+    db.query(Roadmap).filter(Roadmap.student_id == current_user.id).update({"is_active": False})
+
     try:
         db.commit()
     except Exception as e:
@@ -123,6 +119,8 @@ async def select_career(
 
     return {"success": True, "career": career.title}
 
+
+# 👉 FIXED 3: Restored the missing GET endpoint to fix the 404 Error!
 @router.get("/selected-career", response_model=SelectedCareerResponse)
 async def get_selected_career(
     db: Session = Depends(get_db),
