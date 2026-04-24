@@ -39,7 +39,8 @@ class User(Base):
     passion_strength_data = Column(JSONB, nullable=True)
     aspiration_data = Column(JSONB, nullable=True)
     career_interest_data = Column(JSONB, nullable=True)
-
+    eq_data = Column(JSONB, nullable=True)
+    orientation_data = Column(JSONB, nullable=True)
     def __repr__(self):
         return f"<User {self.email}>"
 class CareerDiscoveryReport(Base):

@@ -82,14 +82,16 @@ class RoadmapResponse(BaseModel):
 
 # ── Gold Prompt ───────────────────────────────────────────────────────────────
 
+
 _GOLD_SYSTEM_PROMPT = """\
 You are an Expert Career Architect and Personalized Learning Coach. \
 Build a deeply personalized, achievable 6-month roadmap for the student below. \
-This is NOT a generic tutorial — every decision must reflect THIS student's data.
+This is NOT a generic 10-year path — every decision must reflect THIS student's current age/class and data.
 
 ╔══════════════════════════════════════════════════════╗
   STUDENT PROFILE
 ╚══════════════════════════════════════════════════════╝
+Current Class/Grade: {current_class}
 Target Career  : {career_goal}
 Long-term Vision: {vision}
 Academic Background: {academic_summary}
@@ -99,35 +101,49 @@ Daily Study Availability: {study_hours}
 Financial Constraints: {financial_context}
 
 ╔══════════════════════════════════════════════════════╗
-  MENTOR ACTION ITEMS  ← HIGH PRIORITY, address these first
+  PREVIOUS 6-MONTH HISTORY
 ╚══════════════════════════════════════════════════════╝
-{mentor_action_items}
+{past_summary}
 
 ╔══════════════════════════════════════════════════════╗
+
   PARENT OBSERVATIONS  ← behavioral context
+
 ╚══════════════════════════════════════════════════════╝
+
 {parent_observations}
+
+
+
+╔══════════════════════════════════════════════════════╗
+
+  MENTOR ACTION ITEMS  ← HIGH PRIORITY, address these first
+
+╚══════════════════════════════════════════════════════╝
+
+{mentor_action_items}
+
+
+
 
 ╔══════════════════════════════════════════════════════╗
   MANDATORY RULES
 ╚══════════════════════════════════════════════════════╝
-1. The roadmap title and every phase must directly serve "{career_goal}". \
-   Never substitute with a generic career path.
-2. Start from the student's ACTUAL level — derive it from their academic/aptitude data. \
-   Do not assume prior knowledge they haven't demonstrated.
-3. Respect study availability: fewer hours = fewer topics, higher ruthless prioritization.
-4. If mentor flagged specific gaps, those skills MUST appear in Phase 1 or Phase 2.
-5. If parent noted behavioral issues (distraction, stress, inconsistency), \
-   embed matching study-habit strategies into the relevant phase description.
-6. Every task must start with an action verb and be completable in one 2–4 hour session.
-7. Resources must be free or affordable: official docs, YouTube, freeCodeCamp, \
-   The Odin Project, MDN, GitHub repos, open textbooks. No paid gatekeeping unless critical.
-8. The milestone_project per phase must be a real, buildable deliverable for a portfolio.
-9. success_criteria must be objectively measurable \
-   (e.g., "Build X from scratch without reference" or "Score 80%+ on Y practice test").
-10. Generate exactly 5 phases covering the full stated duration realistically.
-11. In mentor_adjustments, explicitly state which mentor action items you addressed and where.
-12. In parent_adjustments, explicitly state how you adapted the plan to parent observations.
+1. AGE AWARENESS: You MUST tailor the tasks to a {current_class} student. 
+   - If they are in 6th-8th grade: Focus on curiosity, fun introductory projects, clubs, and foundational math/science. DO NOT suggest college prep or intense certifications.
+   - If they are in 9th-10th grade: Focus on building a portfolio, advanced subjects, and career exploration.
+   - If they are in 11th-12th grade: Focus heavily on exam prep (JEE/SAT), university alignment, and robust projects.
+2. PREVIOUS PROGRESS: Read the "Previous 6-Month History". If they completed tasks previously, advance them to the next level. If they struggled, pivot the strategy.
+3. STRICT 6-MONTH TIMELINE: Generate exactly 5 phases that cover a realistic 6-month timeframe. 
+4. Every task must start with an action verb and be completable in one 2–4 hour session.
+5. Resources must be free or affordable (official docs, YouTube, freeCodeCamp).
+6. In mentor_adjustments, explicitly state which mentor action items you addressed and where.
+7. In parent_adjustments, explicitly state how you adapted the plan to parent observations.
+
+
+
+
+
 
 {format_instructions}
 """
@@ -146,6 +162,8 @@ def _build_llm(api_key: str, base_url: str, model: str) -> ChatOpenAI:
 
 async def generate_roadmap(
     career_goal: str,
+    current_class: str,     # 👉 NEW
+    past_summary: str,
     vision: str = "",
     academic_summary: str = "Not provided",
     aptitude_summary: str = "Not provided",
@@ -164,6 +182,8 @@ async def generate_roadmap(
     invoke_args = {
         "career_goal": career_goal,
         "vision": vision or career_goal,
+        "current_class": current_class,   # 👉 NEW
+        "past_summary": past_summary,
         "academic_summary": academic_summary,
         "aptitude_summary": aptitude_summary,
         "personality_summary": personality_summary,
@@ -298,14 +318,33 @@ async def get_career_roadmap(
             or ""
         )
 
+    # 👉 1. GET CURRENT CLASS
+    current_class = "9th"
+    if isinstance(current_user.academic_data, dict):
+        current_class = current_user.academic_data.get("current_class", "9th")
+
+    # 👉 2. GENERATE PAST SUMMARY
+    past_roadmaps = db.query(Roadmap).filter(
+        Roadmap.student_id == current_user.id,
+        Roadmap.is_active == False
+    ).order_by(Roadmap.phase_number.desc()).all()
+
+    past_summary = "This is the student's first 6-month cycle. Start from the basics for their age level."
+    if past_roadmaps:
+        last_rm = past_roadmaps[0]
+        past_summary = f"Student recently completed Phase {last_rm.phase_number}. They achieved a completion rate of {last_rm.progress_percentage}%."
+
     mentor_rows = db.query(MentorFeedback).filter(MentorFeedback.student_id == current_user.id).order_by(MentorFeedback.submitted_at.desc()).limit(3).all()
     mentor_action_items = "\n".join(f"• {r.action_items}" for r in mentor_rows if r.action_items) or "None"
 
     parent_rows = db.query(ParentFeedback).filter(ParentFeedback.student_id == current_user.id).order_by(ParentFeedback.logged_at.desc()).limit(3).all()
     parent_observations = "\n".join(f"• Study habits: {r.study_habits or 'N/A'} | Behavior: {r.behavior_insights or 'N/A'}" for r in parent_rows) or "None"
 
+    # 👉 3. PASS THE NEW VARIABLES INTO THE FUNCTION
     return await generate_roadmap(
         career_goal=career_goal,
+        current_class=current_class, # 👈 Passed in here
+        past_summary=past_summary,   # 👈 Passed in here
         vision=vision,
         academic_summary=_academic_summary(current_user.academic_data),
         aptitude_summary=_aptitude_summary(current_user.apti_data),
@@ -315,24 +354,34 @@ async def get_career_roadmap(
         mentor_action_items=mentor_action_items,
         parent_observations=parent_observations,
     )
-
-
 # ── Persistence Endpoints ────────────────────────────────────────────────────────
 
 @router.post("/save", status_code=201)
 def save_roadmap(body: CareerRoadmapResponse, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Remove existing roadmap for this student
-    db.query(Roadmap).filter(Roadmap.student_id == current_user.id).delete()
     
+    # 1. Archive old roadmaps (DO NOT DELETE THEM)
+    old_roadmaps = db.query(Roadmap).filter(Roadmap.student_id == current_user.id).all()
+    max_phase = 0
+    for rm in old_roadmaps:
+        rm.is_active = False # Deactivate old roadmaps
+        if rm.phase_number > max_phase:
+            max_phase = rm.phase_number
+            
+    new_phase_number = max_phase + 1
+    
+    # 2. Create the NEW Active Roadmap
     new_roadmap = Roadmap(
         student_id=current_user.id,
         title=body.career_title,
-        description=f"Level: {body.student_level} | Duration: {body.total_duration}",
-        status="Overview"
+        description=f"Level: {body.student_level} | Duration: 6 Months (Phase {new_phase_number})",
+        status="Overview",
+        phase_number=new_phase_number, # Track cycle
+        is_active=True                 # Make it the active one
     )
     db.add(new_roadmap)
     db.flush() # Get roadmap ID
 
+    # 3. Add Phases and Tasks attached to the new roadmap
     for p_idx, p_data in enumerate(body.phases):
         phase = RoadmapPhase(
             roadmap_id=new_roadmap.id,
@@ -357,11 +406,15 @@ def save_roadmap(body: CareerRoadmapResponse, current_user: User = Depends(get_c
     db.commit()
     return {"message": "Roadmap persisted successfully.", "roadmap_id": new_roadmap.id}
 
-
 @router.post("/start")
 def start_roadmap(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    roadmap = db.query(Roadmap).filter(Roadmap.student_id == current_user.id).first()
-    if not roadmap: raise HTTPException(status_code=404, detail="No roadmap found.")
+    # 👉 FIXED: Make sure we are only starting the ACTIVE roadmap!
+    roadmap = db.query(Roadmap).filter(
+        Roadmap.student_id == current_user.id, 
+        Roadmap.is_active == True
+    ).first()
+    
+    if not roadmap: raise HTTPException(status_code=404, detail="No active roadmap found.")
     
     roadmap.status = "Active"
     # Mark first phase as Active
@@ -372,13 +425,16 @@ def start_roadmap(current_user: User = Depends(get_current_user), db: Session = 
     db.commit()
     return {"message": "Journey started!"}
 
-
 @router.get("/current", response_model=RoadmapResponse)
 def get_current_roadmap(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    roadmap = db.query(Roadmap).filter(Roadmap.student_id == current_user.id).first()
+    # 👉 ONLY fetch the currently active one!
+    roadmap = db.query(Roadmap).filter(
+        Roadmap.student_id == current_user.id, 
+        Roadmap.is_active == True
+    ).first()
+    
     if not roadmap: raise HTTPException(status_code=404, detail="No active roadmap.")
     return roadmap
-
 
 @router.get("/student/{student_id}", response_model=RoadmapResponse)
 def get_student_roadmap(
