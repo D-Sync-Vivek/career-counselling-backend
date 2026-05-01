@@ -21,7 +21,7 @@ from core.security import SECRET_KEY, ALGORITHM
 from api.deps import get_current_user
 from models.users import User, UserRole
 from models.mentorship import (
-    Mentor, SessionLog, ChatMessage, MentorshipRequest
+    Mentor, SessionLog, ChatMessage, MentorshipRequest, SessionAttendance, StudentFeedback
 )
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -79,6 +79,7 @@ class MentorResponse(BaseModel):
     years_experience: int
     rating: float
     is_verified: bool
+    connection_status: str = "none"
     class Config:
         from_attributes = True
 
@@ -119,6 +120,12 @@ class UpcomingSessionResponse(BaseModel):
 class InstantSessionIn(BaseModel):
     delay_minutes: int = Field(default=0, ge=0, description="0 for instant, 60 for 1 hour")
     topic: str = Field(default="Open Mentorship Session")
+
+class FeedbackIn(BaseModel):
+    session_id: UUID
+    student_id: UUID
+    rating: int
+    feedback: str
 
 # ── PROFILE & SEARCH ──────────────────────────────────────────────────────
 
@@ -177,15 +184,39 @@ def get_my_mentor_profile(current_user: User = Depends(get_current_user), db: Se
     }
 
 @router.get("/mentorship/search/", response_model=List[MentorResponse])
-def search_mentors(career_goal: str = Query(...), db: Session = Depends(get_db)):
+def search_mentors(
+    career_goal: str = Query(...), 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) # Context required to check relationship
+):
+    # Vector search
     search_vector = embed_model.embed_query(career_goal)
-    results = (
+    mentors = (
         db.query(Mentor)
         .options(joinedload(Mentor.user))
         .filter(Mentor.is_verified == True)
         .order_by(Mentor.expertise_vector.cosine_distance(search_vector))
         .limit(10).all()
     )
+    if not mentors:
+        return []
+    
+    # Extract the IDs of the required mentors
+    mentor_ids = [m.id for m in mentors]
+
+    requests = (
+        db.query(MentorshipRequest.mentor_id, MentorshipRequest.status)
+        .filter(
+            MentorshipRequest.student_id == current_user.id,
+            MentorshipRequest.mentor_id.in_(mentor_ids),
+            MentorshipRequest.request_type == "connection"
+        )
+        .all()
+    )
+
+    # O(1) lookup map for the statuses
+    status_map = {req.mentor_id: req.status for req in requests}
+
     return [
         MentorResponse(
             id=m.id,
@@ -196,12 +227,17 @@ def search_mentors(career_goal: str = Query(...), db: Session = Depends(get_db))
             years_experience=m.years_experience,
             rating=m.rating,
             is_verified=m.is_verified,
+            connection_status=status_map.get(m.id, "none") # Attaches the status, defaults to "none"
         )
-        for m in results
+        for m in mentors
     ]
 
 @router.get("/mentorship/mentors/{mentor_id}", response_model=MentorResponse)
-def get_mentor_detail(mentor_id: UUID, db: Session = Depends(get_db)):
+def get_mentor_detail(
+    mentor_id: UUID, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+    ):
     mentor = (
         db.query(Mentor)
         .options(joinedload(Mentor.user))
@@ -210,6 +246,19 @@ def get_mentor_detail(mentor_id: UUID, db: Session = Depends(get_db)):
     )
     if not mentor:
         raise HTTPException(status_code=404, detail="Mentor not found.")
+    
+    # Check connection status
+    connection_req = (
+        db.query(MentorshipRequest.status)
+        .filter(
+            MentorshipRequest.student_id == current_user.id,
+            MentorshipRequest.mentor_id == mentor.id,
+            MentorshipRequest.request_type == "connection"
+        )
+        .first()
+    )
+
+    status = connection_req.status if connection_req else "none"
     return MentorResponse(
         id=mentor.id,
         user_id=mentor.user_id,
@@ -219,6 +268,7 @@ def get_mentor_detail(mentor_id: UUID, db: Session = Depends(get_db)):
         years_experience=mentor.years_experience,
         rating=mentor.rating,
         is_verified=mentor.is_verified,
+        connection_status=status
     )
 
 
@@ -354,6 +404,25 @@ async def join_video_session(session_id: UUID, current_user: User = Depends(get_
 
     if not is_mentor and not is_authorized_student:
         raise HTTPException(status_code=403, detail="You must be connected to this mentor to join their broadcast.")
+    
+    if is_authorized_student:
+        try:
+            # Try to log attendance
+            attendance = db.query(SessionAttendance).filter(
+                SessionAttendance.session_id == session_id,
+                SessionAttendance.student_id == current_user.id
+            ).first()
+            
+            if not attendance:
+                new_attendance = SessionAttendance(session_id=session_id, student_id=current_user.id)
+                db.add(new_attendance)
+                db.commit()
+        except Exception as e:
+            # If the table doesn't exist, SQLAlchemy throws an error.
+            # We catch it, rollback the failed transaction, and move on.
+            db.rollback() 
+            logger.warning(f"Attendance not recorded (Table likely missing): {e}")
+            # We DON'T raise an HTTPException here because we want the student to join the call regardless.
 
     if not session.dyte_meeting_id:
         try:
@@ -405,6 +474,53 @@ async def end_session(session_id: UUID, current_user: User = Depends(get_current
     db.commit()
     await manager.broadcast(str(session_id), {"event": "SESSION_ENDED", "message": "Concluded.", "session_id": str(session_id)})
     return {"message": "Session completed."}
+
+# Mentor feedback 
+@router.get("/mentorship/sessions/completed")
+def get_completed_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
+# A session is 'completed' if the scheduled time has passed e.g. by 1 hour
+    now = datetime.now(IST).replace(tzinfo=None)
+
+    sessions = db.query(SessionLog).filter(
+        SessionLog.mentor_id == mentor.id,
+        SessionLog.scheduled_at < now
+    ).all()
+    return sessions
+
+
+@router.get("/mentorship/sessions/{session_id}/students")
+def get_session_students(session_id: UUID, db: Session = Depends(get_db)):
+    # Join Attendance with User to get names.
+    roster = db.query(
+        User.id,
+        User.full_name.lable("name"),
+        SessionAttendance.feedback_submitted
+    ).join(SessionAttendance, User.id == SessionAttendance.student_id)\
+    .filter(SessionAttendance.session_id == session_id).all()
+
+    return [{"id": r.id, "name": r.name, "status": "completed" if r.feedback_submitted else "pending"} for r in roster]
+
+
+@router.post("/mentorship/feedback")
+def submit_student_feedback(body: FeedbackIn, db: Session = Depends(get_db)): 
+    # 1. Save feedback to a new Feedback table
+    new_feedback = StudentFeedback(
+        session_id=body.session_id,
+        student_id=body.student_id,
+        rating=body.rating,
+        content=body.feedback
+    )
+    db.add(new_feedback)
+
+    # 2. Mark Attendance as 'feedback_submitted'
+    db.query(SessionAttendance).filter(
+        SessionAttendance.session_id == body.session_id,
+        SessionAttendance.student_id == body.student_id
+    ).update({"feedback_submitted": True})
+
+    db.commit()
+    return {"status": "success"}
 
 
 # ── CHAT & REAL-TIME ──────────────────────────────────────────────────────

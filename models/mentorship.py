@@ -1,3 +1,4 @@
+from datetime import datetime
 import uuid
 from sqlalchemy import Column, String, Float, Boolean, ForeignKey, DateTime, Integer, Text, Time
 from sqlalchemy.dialects.postgresql import UUID
@@ -86,3 +87,21 @@ class ParentStudentLink(Base):
     parent_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     student_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     linked_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class SessionAttendance(Base):
+    __tablename__ = "session_attendance"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("session_logs.id"), nullable=False)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    joined_at = Column(DateTime, default=datetime.now)
+    feedback_submitted = Column(Boolean, default=False)
+
+class StudentFeedback(Base):
+    __tablename__ = "student_feedback"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    session_id = Column(UUID(as_uuid=True), ForeignKey("session_logs.id"), nullable=False)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    rating = Column(Integer, nullable=False)
+    content = Column(String, nullable=True)
