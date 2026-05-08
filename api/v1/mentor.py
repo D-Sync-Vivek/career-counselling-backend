@@ -110,6 +110,7 @@ class PendingConnectionResponse(BaseModel):
 
 class UpcomingSessionResponse(BaseModel):
     session_id: UUID
+    session_title: Optional[str] = "Mentorship Session"
     scheduled_at: datetime
     other_party_name: str
     other_user_id: Optional[UUID]
@@ -122,8 +123,6 @@ class InstantSessionIn(BaseModel):
     topic: str = Field(default="Open Mentorship Session")
 
 class FeedbackIn(BaseModel):
-    session_id: UUID
-    student_id: UUID
     rating: int
     feedback: str
 
@@ -302,6 +301,7 @@ async def broadcast_instant_session(body: InstantSessionIn, current_user: User =
     # Student ID is None because this is a broadcast
     session = SessionLog(
         student_id=None, 
+        topics=body.topic,
         mentor_id=mentor.id,
         scheduled_at=scheduled_time,
         status="scheduled",
@@ -341,6 +341,7 @@ def get_upcoming_sessions(current_user: User = Depends(get_current_user), db: Se
             sch_naive = s.scheduled_at.replace(tzinfo=None)
             res.append({
                 "session_id": s.id, 
+                "session_title": s.topics if s.topics else "Mentorship Session",
                 "scheduled_at": sch_naive,
                 "other_party_name": "Your Connected Students",
                 "other_user_id": None,
@@ -368,6 +369,7 @@ def get_upcoming_sessions(current_user: User = Depends(get_current_user), db: Se
             sch_naive = s.scheduled_at.replace(tzinfo=None)
             res.append({
                 "session_id": s.id, 
+                "session_title": s.topics if s.topics else "Mentorship Session",
                 "scheduled_at": sch_naive,
                 "other_party_name": mentor_user.full_name if mentor_user else "Mentor",
                 "other_user_id": mentor_user.id if mentor_user else None,
@@ -476,38 +478,72 @@ async def end_session(session_id: UUID, current_user: User = Depends(get_current
     return {"message": "Session completed."}
 
 # Mentor feedback 
-@router.get("/mentorship/sessions/completed")
+@router.get("/sessions/completed", response_model=List[UpcomingSessionResponse])
 def get_completed_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
-# A session is 'completed' if the scheduled time has passed e.g. by 1 hour
+    """Returns sessions that have already taken place for the mentor to provide feedback."""
+    mentor_profile = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
+    
+    if not mentor_profile:
+        raise HTTPException(status_code=403, detail="Only mentors can access completed sessions.")
+
     now = datetime.now(IST).replace(tzinfo=None)
 
+    # Fetch sessions where the scheduled time is in the past
     sessions = db.query(SessionLog).filter(
-        SessionLog.mentor_id == mentor.id,
-        SessionLog.scheduled_at < now
-    ).all()
-    return sessions
+        SessionLog.mentor_id == mentor_profile.id,
+        SessionLog.scheduled_at < now 
+    ).order_by(SessionLog.scheduled_at.desc()).all()
 
+    res = []
+    for s in sessions:
+        res.append({
+            "session_id": s.id, 
+            "session_title": s.topics if s.topics else "Mentorship Session",
+            "scheduled_at": s.scheduled_at,
+            "other_party_name": "Your Connected Students",
+            "other_user_id": None,
+            "is_live": False,
+            "seconds_until_start": 0
+        })
+    return res
 
-@router.get("/mentorship/sessions/{session_id}/students")
+@router.get("/sessions/{session_id}/students")
 def get_session_students(session_id: UUID, db: Session = Depends(get_db)):
-    # Join Attendance with User to get names.
-    roster = db.query(
-        User.id,
-        User.full_name.lable("name"),
-        SessionAttendance.feedback_submitted
-    ).join(SessionAttendance, User.id == SessionAttendance.student_id)\
-    .filter(SessionAttendance.session_id == session_id).all()
+    try:
+        roster = db.query(
+            User.id,
+            User.full_name,
+            SessionAttendance.feedback_submitted
+        ).join(SessionAttendance, User.id == SessionAttendance.student_id)\
+         .filter(SessionAttendance.session_id == session_id).all()
 
-    return [{"id": r.id, "name": r.name, "status": "completed" if r.feedback_submitted else "pending"} for r in roster]
+        result = [
+            {
+                "id": str(r.id), 
+                "name": r.full_name, 
+                "status": "completed" if r.feedback_submitted else "pending"
+            } for r in roster
+        ]
+        return result
+    except Exception as e:
+        # If the table is missing, rollback the poisoned transaction
+        db.rollback()
+        logger.warning(f"Could not fetch roster (Table missing): {e}")
+        
+        # Return an empty list so the frontend doesn't crash
+        # It will just show "No students found" instead of an error screen
+        return []
 
-
-@router.post("/mentorship/feedback")
-def submit_student_feedback(body: FeedbackIn, db: Session = Depends(get_db)): 
-    # 1. Save feedback to a new Feedback table
+@router.post("/sessions/{session_id}/students/{student_id}/feedback")
+def submit_student_feedback(
+    session_id: UUID, 
+    student_id: UUID, 
+    body: FeedbackIn, 
+    db: Session = Depends(get_db)
+): 
     new_feedback = StudentFeedback(
-        session_id=body.session_id,
-        student_id=body.student_id,
+        session_id=session_id,
+        student_id=student_id,
         rating=body.rating,
         content=body.feedback
     )
@@ -515,8 +551,8 @@ def submit_student_feedback(body: FeedbackIn, db: Session = Depends(get_db)):
 
     # 2. Mark Attendance as 'feedback_submitted'
     db.query(SessionAttendance).filter(
-        SessionAttendance.session_id == body.session_id,
-        SessionAttendance.student_id == body.student_id
+        SessionAttendance.session_id == session_id,
+        SessionAttendance.student_id == student_id
     ).update({"feedback_submitted": True})
 
     db.commit()
