@@ -142,8 +142,14 @@ Financial Constraints: {financial_context}
 
 
 
-
-
+╔══════════════════════════════════════════════════════╗
+  PIVOT INSTRUCTIONS (If adjusting existing plan)
+╚══════════════════════════════════════════════════════╝
+If "past_summary" contains "CURRENT PLAN BEING ADJUSTED":
+1. Compare the Mentor's Action Items against the current tasks.
+2. If the Mentor says "Focus more on X", replace lower-priority tasks in the current phase with X.
+3. If the Parent says "Student is struggling with focus/time", reduce the difficulty or number of tasks per week.
+4. DO NOT change the career goal unless the mentor explicitly suggests a career pivot.
 
 {format_instructions}
 """
