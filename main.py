@@ -18,6 +18,8 @@ from api.v1.chat import router as chat_router, purge_old_messages_loop
 from api.v1.reports import router as reports_router # Adjust path if needed
 # 👉 FIXED: Correctly importing the new psychometrics router
 from router.psychometrics import router as psychometrics_router 
+# New router
+from api.v1.adjustmypath import router as adjust_router
 
 # --- NEW IMPORTS FOR DATABASE CREATION ---
 from core.database import engine, Base
@@ -84,6 +86,7 @@ app.include_router(chat_router)
 # 👉 FIXED: Including the updated router properly
 app.include_router(psychometrics_router)
 app.include_router(reports_router)
+app.include_router(adjust_router)
 @app.get("/")
 async def root():
     return {"message": "Career Counseling AI API is running."}
