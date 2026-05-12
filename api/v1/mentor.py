@@ -713,6 +713,42 @@ def get_pending_connection_requests(current_user: User = Depends(get_current_use
         })
     return result
 
+@router.get("/mentors/students/connected")
+def get_connected_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Returns a list of students who have an accepted connection with the current mentor."""
+    # 1. Indentify the mentor profile
+    mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
+
+    if not mentor:
+        raise HTTPException(status_code=403, detail="Mentor profile not found")
+    
+    # 2. Join MentorshipRequest with User to get student details
+    connected_students = (
+        db.query(MentorshipRequest, User)
+        .join(User, MentorshipRequest.student_id == User.id)
+        .filter(
+            MentorshipRequest.mentor_id == mentor.id,
+            MentorshipRequest.request_type == "connection",
+            MentorshipRequest.status == "accepted"
+        )
+        .order_by(User.full_name.asc())
+        .all()
+    )    
+
+    result = []
+    for req, student in connected_students:
+        result.append({
+            "connection_id": req.id,
+            "student_id": student.id,
+            "full_name": student.full_name,
+            "email": student.email,
+            "connection_since": req.updated_at or req.created_at,
+            "academic_class": student.academic_data.get("current_class", "N/A") if student.academic_data else "N/A",
+            "dream_career": student.aspiration_data.get("dream_career", "N/A") if student.aspiration_data else "N/A"
+        })
+    
+    return result
+
 @router.get("/mentors/students/{student_id}/profile")
 def get_student_profile_for_mentor(student_id: UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
