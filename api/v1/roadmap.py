@@ -139,7 +139,7 @@ Financial Constraints: {financial_context}
 5. Resources must be free or affordable (official docs, YouTube, freeCodeCamp).
 6. In mentor_adjustments, explicitly state which mentor action items you addressed and where.
 7. In parent_adjustments, explicitly state how you adapted the plan to parent observations.
-
+8. If they are currently in 12th grade BUT their "Previous 6-Month History" shows they already completed Phase 2, ASSUME THEY HAVE GRADUATED. Pivot the entire roadmap to focus on "First Year of College/University" survival, finding early internships, and professional networking. Do not give them high school tasks anymore.
 
 
 ╔══════════════════════════════════════════════════════╗

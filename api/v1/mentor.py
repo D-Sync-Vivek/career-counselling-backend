@@ -777,7 +777,43 @@ def get_student_profile_for_mentor(student_id: UUID, current_user: User = Depend
         "aspiration_data": student.aspiration_data or {},
         "lifestyle_data": student.lifestyle_data or {},
     }
+@router.get("/mentors/students/connected")
+def get_connected_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # 1. Ensure the user making the request is actually a mentor
+    mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
+    if not mentor:
+        raise HTTPException(status_code=403, detail="Mentor profile not found.")
 
+    # 2. Query for accepted connection requests and join with the User table to get student details
+    connected_students = (
+        db.query(MentorshipRequest, User)
+        .join(User, MentorshipRequest.student_id == User.id)
+        .filter(
+            MentorshipRequest.mentor_id == mentor.id,
+            MentorshipRequest.request_type == "connection",
+            MentorshipRequest.status == "accepted"
+        )
+        .order_by(MentorshipRequest.created_at.desc())
+        .all()
+    )
+
+    # 3. Format the response for your frontend
+    result = []
+    for req, student in connected_students:
+        result.append({
+            "request_id": req.id,
+            "student_id": student.id,
+            "student_name": student.full_name,
+            "connected_at": req.created_at, # Or req.updated_at if your model supports it
+            "student_snapshot": {
+                "apti_data": student.apti_data or {},
+                "personality_data": student.personality_data or {},
+                "academic_data": student.academic_data or {},
+                "aspiration_data": student.aspiration_data or {},
+            }
+        })
+        
+    return result
 @router.patch("/connections/{request_id}/accept")
 def accept_connection_request(request_id: UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     mentor = db.query(Mentor).filter(Mentor.user_id == current_user.id).first()
