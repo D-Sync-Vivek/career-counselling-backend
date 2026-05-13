@@ -85,6 +85,16 @@ async def select_career(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # 1. Check lock status first
+    insight = db.query(StudentInsight).filter(StudentInsight.student_id == current_user.id).first()
+
+    if insight and insight.recommended_career_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="A career is already locked for this user. Modifications are strictly prohibited"
+        )
+    
+    # 2. Proceed with selection.
     career = db.query(Career).filter(Career.title == payload.career_title).first()
     
     if not career:
@@ -95,8 +105,6 @@ async def select_career(
         )
         db.add(career)
         db.flush() 
-
-    insight = db.query(StudentInsight).filter(StudentInsight.student_id == current_user.id).first()
     
     if insight:
         insight.recommended_career_id = career.id
